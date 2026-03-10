@@ -5,7 +5,7 @@ Usage:
     python label_carts.py --images_dir <path_to_images> --output_csv <path_to_csv>
 
 Keyboard shortcuts:
-    Fill Level:  1=Empty  2=Partial  3=Full
+    Fill Level:  1=Empty  2=Partial  3=Full 4=Unclear
     Bag Status:  B=Bagged  U=Unbagged
     Navigation:  A/Left=Prev  D/Right=Next  S=Skip  Z=Undo  Q=Quit  Escape=Back
     Zoom:        +/= Zoom in   -/_ Zoom out   0 Reset zoom   Scroll=Zoom
@@ -95,13 +95,26 @@ class CartLabelerApp:
 
         # Data
         self.labels = load_existing_labels(output_csv)
-        all_images = collect_images(images_dir)
-        labeled_set = set(self.labels.keys())
-        self.unlabeled = [p for p in all_images if p not in labeled_set]
-        self.total_images = len(all_images)
-        self.history = []
-        self.idx = 0
+        self.images = collect_images(images_dir)
 
+        # Normalize CSV keys (basename) for matching
+        self.labels = {
+            os.path.basename(k): v
+            for k, v in self.labels.items()
+        }
+
+        self.total_images = len(self.images)
+        self.history = []
+
+        # Find first unlabeled image
+        self.idx = 0
+        for i, p in enumerate(self.images):
+            name = os.path.basename(p)
+            if name not in self.labels:
+                self.idx = i
+                break
+        else:
+            self.idx = 0  # everything labeled
         # State
         self.stage = 'fill'
         self.fill_label = None
@@ -129,7 +142,7 @@ class CartLabelerApp:
             self._auto_label_all_empty()
             return
 
-        if not self.unlabeled:
+        if not self.images:
             self.status_var.set("All images already labeled!")
             return
 
@@ -153,7 +166,7 @@ class CartLabelerApp:
                  bg=BG_DARK, fg=FG).pack(side='left')
 
         # Jump button
-        jump_btn = tk.Button(top, text="Jump (G)", font=('Segoe UI', 9),
+        jump_btn = tk.Button(top, text="Jump (J)", font=('Segoe UI', 9),
                              bg=BTN_BG, fg=ACCENT, activebackground=BTN_ACTIVE,
                              relief='flat', padx=8, pady=2, cursor='hand2',
                              command=self._on_jump)
@@ -227,6 +240,7 @@ class CartLabelerApp:
             ('1  EMPTY',       'empty',       GREEN),
             ('2  PARTIAL',     'partial',     YELLOW),
             ('3  FULL',        'full',        PEACH),
+            ('4  UNCLEAR',     'unclear',     BG_DARK)
         ]
         for text, value, color in fill_config:
             btn = tk.Button(self.fill_frame, text=text, font=('Segoe UI', 11, 'bold'),
@@ -261,8 +275,9 @@ class CartLabelerApp:
             ('Undo (Z)',    self._on_undo, FG_DIM),
             ('Skip (S)',    self._on_skip, FG_DIM),
             ('Back (Esc)',  self._on_back, YELLOW),
-            ('Jump (G)',    self._on_jump, ACCENT),
+            ('Jump (J)',    self._on_jump, ACCENT),
             ('Quit (Q)',    self._on_quit, RED),
+            ('Current (C)', self._jump_to_first_unlabeled_fill, GREEN),
         ]
         for text, cmd, color in nav_btns:
             btn = tk.Button(bottom, text=text, font=('Segoe UI', 9),
@@ -279,6 +294,7 @@ class CartLabelerApp:
         self.root.bind('1', lambda e: self._on_fill('empty'))
         self.root.bind('2', lambda e: self._on_fill('partial'))
         self.root.bind('3', lambda e: self._on_fill('full'))
+        self.root.bind('4', lambda e: self._on_fill('unclear'))
         # Bag status
         self.root.bind('b', lambda e: self._on_bag('bagged'))
         self.root.bind('B', lambda e: self._on_bag('bagged'))
@@ -293,8 +309,6 @@ class CartLabelerApp:
         self.root.bind('Q', lambda e: self._on_quit())
         self.root.bind('<Escape>', lambda e: self._on_back())
         # Jump
-        self.root.bind('g', lambda e: self._on_jump())
-        self.root.bind('G', lambda e: self._on_jump())
         self.root.bind('j', lambda e: self._on_jump())
         self.root.bind('J', lambda e: self._on_jump())
         # Prev / Next (without labeling)
@@ -310,6 +324,9 @@ class CartLabelerApp:
         self.root.bind('<minus>', lambda e: self._zoom_out())
         self.root.bind('<underscore>', lambda e: self._zoom_out())
         self.root.bind('0', lambda e: self._zoom_reset())
+        # Current (Go to first image without a fill label)
+        self.root.bind('c', lambda e: self._jump_to_first_unlabeled_fill())
+        self.root.bind('C', lambda e: self._jump_to_first_unlabeled_fill())
 
     # -----------------------------------------------------------------------
     # Zoom & Pan
@@ -373,7 +390,7 @@ class CartLabelerApp:
     # -----------------------------------------------------------------------
 
     def _show_current(self):
-        if self.idx >= len(self.unlabeled):
+        if self.idx >= len(self.images):
             save_labels(self.output_csv, self.labels)
             self.stage_var.set("ALL DONE!")
             self.status_var.set(f"Labeled {len(self.labels)} images total. Saved to {self.output_csv}")
@@ -383,14 +400,27 @@ class CartLabelerApp:
             self.bag_frame.pack_forget()
             return
 
-        img_path = self.unlabeled[self.idx]
+        img_path = self.images[self.idx]
         img_name = os.path.basename(img_path)
+
+        if img_name in self.labels:
+            existing = self.labels[img_name]
+            self.fill_label = existing["fill_level"]
+
+            # Always show fill first
+            self.stage = "fill"
+
+        # Reset button highlights
+        self._clear_button_highlights()
+
+        # Highlight existing labels if present
+        self._highlight_existing_labels(img_path)
 
         # Update info
         labeled_count = len(self.labels)
-        remaining = len(self.unlabeled) - self.idx
-        self.progress_var.set(f"  {self.idx + 1} / {len(self.unlabeled)}  |  "
-                              f"Labeled: {labeled_count}  |  Remaining: {remaining}")
+        remaining = self.total_images - len(self.labels)
+        self.progress_var.set(f"  {self.idx + 1} / {self.total_images}  |  "
+                            f"Labeled: {labeled_count}  |  Remaining: {remaining}")
         self.filename_var.set(img_name)
         self.progressbar['value'] = labeled_count
 
@@ -459,6 +489,41 @@ class CartLabelerApp:
             self.fill_frame.pack_forget()
             self.bag_frame.pack(fill='x')
 
+    def _clear_button_highlights(self):
+        for btn in self.fill_buttons.values():
+            btn.configure(highlightthickness=0, bd=0)
+        for btn in self.bag_buttons.values():
+            btn.configure(highlightthickness=0, bd=0)
+
+    def _highlight_existing_labels(self, img_path):
+        """Highlight buttons if this image already has labels."""
+        img_name = os.path.basename(img_path)
+
+        if img_name not in self.labels:
+            return
+
+        label = self.labels[img_name]
+        fill = label.get('fill_level')
+        bag = label.get('bag_status')
+
+        # Fill status ALWAYS shown
+        if fill in self.fill_buttons:
+            self.fill_buttons[fill].configure(
+                highlightbackground=ACCENT,
+                highlightcolor=ACCENT,
+                highlightthickness=5,
+                bd=5
+            )
+
+        # Bag status only shown if we are in bag stage
+        if self.stage == "bag" and bag in self.bag_buttons:
+            self.bag_buttons[bag].configure(
+                highlightbackground=ACCENT,
+                highlightcolor=ACCENT,
+                highlightthickness=5,
+                bd=5
+            )
+
     # -----------------------------------------------------------------------
     # Actions
     # -----------------------------------------------------------------------
@@ -466,10 +531,10 @@ class CartLabelerApp:
     def _on_fill(self, value):
         if self.stage != 'fill':
             return
-        if self.idx >= len(self.unlabeled):
+        if self.idx >= len(self.images):
             return
         self.fill_label = value
-        if value == 'empty':
+        if value in ('empty', 'unclear'):
             self._commit_label(value, 'not_applicable')
         else:
             self.stage = 'bag'
@@ -478,12 +543,12 @@ class CartLabelerApp:
     def _on_bag(self, value):
         if self.stage != 'bag':
             return
-        if self.idx >= len(self.unlabeled):
+        if self.idx >= len(self.images):
             return
         self._commit_label(self.fill_label, value)
 
     def _commit_label(self, fill, bag):
-        img_name = self.unlabeled[self.idx]
+        img_name = os.path.basename(self.images[self.idx])
         self.labels[img_name] = {'fill_level': fill, 'bag_status': bag}
         self.history.append(img_name)
         save_labels(self.output_csv, self.labels)
@@ -516,7 +581,7 @@ class CartLabelerApp:
 
     def _on_next(self):
         """Go to next image without labeling (D / Right arrow)."""
-        if self.idx >= len(self.unlabeled) - 1:
+        if self.idx >= len(self.images) - 1:
             self.status_var.set("Already at the last image")
             return
         self.idx += 1
@@ -530,7 +595,7 @@ class CartLabelerApp:
         self._show_current()
 
     def _on_skip(self):
-        if self.idx >= len(self.unlabeled):
+        if self.idx >= len(self.images):
             return
         self.status_var.set("Skipped")
         self.idx += 1
@@ -546,19 +611,29 @@ class CartLabelerApp:
         if not self.history:
             self.status_var.set("Nothing to undo")
             return
+
         last = self.history.pop()
-        del self.labels[last]
+
+        # Remove label
+        if last in self.labels:
+            del self.labels[last]
+
         save_labels(self.output_csv, self.labels)
-        for j, p in enumerate(self.unlabeled):
-            if p == last:
+
+        # Find image index
+        for j, p in enumerate(self.images):
+            if os.path.basename(p) == last:
                 self.idx = j
                 break
+
+        # Reset stage
         if self.pre_label in ('partial', 'full'):
             self.fill_label = self.pre_label
             self.stage = 'bag'
         else:
             self.stage = 'fill'
             self.fill_label = None
+
         self.status_var.set(f"Undid: {last}")
         self._show_current()
 
@@ -573,7 +648,7 @@ class CartLabelerApp:
 
     def _on_jump(self):
         """Open a dialog to jump to a specific image number."""
-        total = len(self.unlabeled)
+        total = len(self.images)
         if total == 0:
             return
         result = simpledialog.askinteger(
@@ -595,6 +670,33 @@ class CartLabelerApp:
             self.status_var.set(f"Jumped to image {result}")
             self._show_current()
 
+    def _jump_to_first_unlabeled_fill(self):
+        """Jump to the first image that does not yet have a fill label."""
+        for i, path in enumerate(self.images):
+            name = os.path.basename(path)
+
+            if name not in self.labels:
+                self.idx = i
+                break
+
+            if not self.labels[name].get("fill_level"):
+                self.idx = i
+                break
+        else:
+            self.status_var.set("All images have fill labels")
+            return
+
+        # Reset stage
+        if self.pre_label in ('partial', 'full'):
+            self.fill_label = self.pre_label
+            self.stage = 'bag'
+        else:
+            self.stage = 'fill'
+            self.fill_label = None
+
+        self.status_var.set(f"Jumped to first unlabeled fill ({self.idx+1})")
+        self._show_current()
+
     def _on_quit(self):
         save_labels(self.output_csv, self.labels)
         print(f"Saved {len(self.labels)} labels to {self.output_csv}")
@@ -602,7 +704,7 @@ class CartLabelerApp:
 
     def _auto_label_all_empty(self):
         count = 0
-        for img_path in self.unlabeled:
+        for img_path in self.images:
             self.labels[img_path] = {'fill_level': 'empty', 'bag_status': 'not_applicable'}
             count += 1
         save_labels(self.output_csv, self.labels)
