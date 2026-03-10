@@ -1,4 +1,4 @@
-Cart Annotation Tool
+# Cart Annotation Tool
 
 A GUI tool for manually labeling cart crop images with **fill level** and **bag status**. Built with Tkinter and Pillow.
 
